@@ -20,6 +20,7 @@ pyvista==0.43.0
 pyvistaqt==0.11.0
 QtPy==2.4.3
 requests==2.32.5
+scipy==1.16.3
 scooby==0.11.0
 six==1.17.0
 typing_extensions==4.15.0
