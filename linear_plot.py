@@ -33,15 +33,15 @@ for folder_name in os.listdir(base_dir):
     if not nii_files:
         continue
 
-    # # Brain mask
-    # if folder_name == brainmask_folder_name:
-    #     for fpath in nii_files:
-    #         fname = os.path.basename(fpath)
-    #         print(f"  Loading structure: {fname}")
-    #         vol = Volume(fpath)
-    #         surf = vol.isosurface()
-    #         surf.c("grey").alpha(0.05)
-    #         brain_mask_structures.append(surf)
+    # Brain mask
+    if folder_name == brainmask_folder_name:
+        for fpath in nii_files:
+            fname = os.path.basename(fpath)
+            print(f"  Loading structure: {fname}")
+            vol = Volume(fpath)
+            surf = vol.isosurface()
+            surf.c("grey").alpha(0.01)
+            brain_mask_structures.append(surf)
     # Obstacles
     elif folder_name == corpus_callosum_folder_name or folder_name == sulci_folder_name or folder_name == ventricles_folder_name:
         for fpath in nii_files:
@@ -49,7 +49,7 @@ for folder_name in os.listdir(base_dir):
             print(f"  Loading structure: {fname}")
             vol = Volume(fpath)
             surf = vol.isosurface()
-            surf.c("red").alpha(0.75)
+            surf.c("red").alpha(0.66)
             obstacle_structures.append(surf)
     # STN
     elif folder_name == stn_folder_name:
@@ -61,6 +61,12 @@ for folder_name in os.listdir(base_dir):
             surf.c("green").alpha(1.0)
             stn_structures.append(surf)                
 
+# Merge brain mask structures to define bounding box
+merged_brain_mask = None
+if brain_mask_structures:
+    print("Merging brain mask structures...")
+    merged_brain_mask = merge(brain_mask_structures)
+    merged_brain_mask.c("grey").alpha(0.01)
 
 # Merge obstacle structures for distance calculations
 merged_obstacles = None
@@ -77,33 +83,26 @@ if stn_structures:
     merged_stn.c("green").alpha(1.0)
 
 ## Create linear path plot
-# Use bounds from brain mask or obstacles to define start point region
-if brain_mask_structures:
-    brain_mask_mesh = merge(brain_mask_structures)
-    xmin, xmax, ymin, ymax, zmin, zmax = brain_mask_mesh.bounds()
-elif merged_obstacles:
-    xmin, xmax, ymin, ymax, zmin, zmax = merged_obstacles.bounds()
-else:
-    # Default bounds if nothing loaded
-    xmin, xmax, ymin, ymax, zmin, zmax = -100, 100, -100, 100, -100, 100
 
-# Get a random point within the STN for end point
-if merged_stn:
+# Keep regenerating start points until we collect min_attempts successful paths
+max_attempts = 1000
+min_attempts = 10
+successful_attempts = []  # Store (start_point, end_point, distance) tuples
+failed_lines = []
+
+for attempt in range(max_attempts):
+    if attempt > min_attempts:
+        break
+    
+    # Select random start (brain surface)
+    random_point = merged_brain_mask.generate_random_points(1)
+    start_point = tuple(random_point.points[0])
+    print(f"Selected start point within brain mask: {start_point}")
+    
+    # Select random end (STN surface)
     random_point = merged_stn.generate_random_points(1)
     end_point = tuple(random_point.points[0])
     print(f"Selected end point within STN: {end_point}")
-else:
-    # Fallback to random point if no STN
-    end_point = (random.uniform(xmin, xmax), random.uniform(ymin, ymax), random.uniform(zmin, zmax))
-    print("Warning: No STN structures found, using random end point")
-
-# Keep regenerating start points until we get a line that doesn't intersect obstacles
-max_attempts = 1000
-path_line = None
-dval = 0
-
-for attempt in range(max_attempts):
-    start_point = (random.uniform(xmin, xmax), random.uniform(ymin, ymax), random.uniform(zmin, zmax))
     
     # Check for intersection if we have obstacles
     if merged_obstacles:
@@ -111,27 +110,49 @@ for attempt in range(max_attempts):
         
         # If no intersections (empty array or None), line is valid
         if intersections is None or len(intersections) == 0:
-            path_line = Line([start_point, end_point]).c("yellow").lw(6)
-            
-            # Also compute distance for reporting
-            d = path_line.distance_to(merged_obstacles)
+            # Compute distance to obstacles
+            temp_line = Line([start_point, end_point])
+            d = temp_line.distance_to(merged_obstacles)
             if isinstance(d, (list, tuple, np.ndarray)):
                 dval = float(np.min(d))
             else:
                 dval = float(d)
             
-            print(f"Generated straight line from {start_point} to {end_point}")
-            print(f"No intersections with obstacles. Minimum distance: {dval:.3f}")
-            break
+            successful_attempts.append((start_point, end_point, dval))
+            print(f"Attempt {attempt+1}: SUCCESS - Distance: {dval:.3f}")
         else:
-            print(f"Attempt {attempt+1}: Line intersects obstacles, regenerating...")
+            # Store failed attempt as brown line
+            failed_line = Line([start_point, end_point]).c("purple").alpha(0.3).lw(5)
+            failed_lines.append(failed_line)
+            print(f"Attempt {attempt+1}: FAIL - Line intersects obstacles")
     else:
         # No obstacles, accept any line
-        path_line = Line([start_point, end_point]).c("yellow").lw(6)
-        print(f"Generated straight line from {start_point} to {end_point}")
-        break
+        temp_line = Line([start_point, end_point])
+        successful_attempts.append((start_point, end_point, 0.0))
+        print(f"Attempt {attempt+1}: SUCCESS (no obstacles)")
 else:
-    print(f"Warning: Could not find a non-intersecting line after {max_attempts} attempts")
+    print(f"Warning: Only found {len(successful_attempts)} non-intersecting lines after {max_attempts} attempts")
+
+# Find the best path (maximum distance from obstacles)
+best_path = None
+suboptimal_lines = []
+
+if successful_attempts:
+    # Sort by distance (descending)
+    successful_attempts.sort(key=lambda x: x[2], reverse=True)
+    
+    # Best path
+    best_start, best_end, best_dist = successful_attempts[0]
+    best_path = Line([best_start, best_end]).c("green").lw(8)
+    print(f"\nBest path: distance {best_dist:.3f}")
+    
+    # All other successful paths as brown
+    for start_pt, end_pt, dist in successful_attempts[1:]:
+        suboptimal_line = Line([start_pt, end_pt]).c("yellow").alpha(0.3).lw(5)
+        suboptimal_lines.append(suboptimal_line)
+        print(f"Suboptimal path: distance {dist:.3f}")
+else:
+    print("No successful paths found!")
 
 # Prepare actors for visualization
 actors = []
@@ -140,8 +161,13 @@ if merged_obstacles:
     actors.append(merged_obstacles)
 if merged_stn:
     actors.append(merged_stn)
-if path_line:
-    actors.append(path_line)
+# Add all failed attempts (intersecting paths)
+actors.extend(failed_lines)
+# Add suboptimal successful paths
+actors.extend(suboptimal_lines)
+# Add best path on top
+if best_path:
+    actors.append(best_path)
 
-print("Rendering scene...")
-show(actors, axes=1, viewup="z", title="Straight Line Path To STN with Obstacle Distance")
+print(f"Rendering scene with {len(failed_lines)} failed attempts, {len(suboptimal_lines)} suboptimal paths, and 1 optimal path...")
+show(actors, axes=1, viewup="z", title="Optimal Path To STN with Obstacle Distance")
