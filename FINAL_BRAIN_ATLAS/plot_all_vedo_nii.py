@@ -6,7 +6,7 @@ import vedo
 from vedo import Volume, show
 
 
-base_dir = "/Users/vivienyu/Desktop/opt_proj/FINAL_BRAIN_ATLAS/nii_exports"
+base_dir = "./FINAL_BRAIN_ATLAS/nii_exports"
 brainmask_folder_name = "BRAIN_MASK"
 
 color_palette = [
