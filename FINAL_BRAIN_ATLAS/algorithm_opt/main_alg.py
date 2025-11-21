@@ -485,13 +485,6 @@ def sample_surface_entries_on_brain(
 # ---------------------------------------------------------------------------
 
 class RRTStarPlanner:
-    """
-    RRT* planner with:
-      - κ curvature constraint
-      - NearestReachable distance ρ
-      - full cost c(E) = a1 f_L + a2 f_D
-    """
-
     def __init__(
         self,
         env: Environment,
@@ -507,7 +500,6 @@ class RRTStarPlanner:
         curve_step: float = 1.0,
         goal_mask: Optional[np.ndarray] = None,   # <--- NEW
     ):
-        log("[RRTStarPlanner.__init__] Initializing RRT* planner")
         self.env = env
         self.eta = float(eta)
         self.r_min = float(r_min)
@@ -515,12 +507,10 @@ class RRTStarPlanner:
         self.goal_radius = float(goal_radius)
         self.curve_step = float(curve_step)
 
-        # cost parameters
         self.L_min = float(L_min)
         self.a1 = float(a1)
         self.a2 = float(a2)
 
-        # distance measure ρ = w_d d^2 + w_theta(1 - |cos θ|)^2
         self.w_d = float(w_d)
         self.w_theta = float(w_theta)
         if abs(self.w_d + self.w_theta - 1.0) > 1e-6:
@@ -533,7 +523,7 @@ class RRTStarPlanner:
         self.vertices: List[Vertex] = []
         self.edges: List[Tuple[int, int]] = []
 
-        self.goal_mask = goal_mask   # <--- NEW: store STN volume mask
+        self.goal_mask = goal_mask      # <--- STORE IT
         log(f"[RRTStarPlanner.__init__] n_samples={self.n_samples}, r_min={self.r_min}, eta={self.eta}, goal_mask_set={self.goal_mask is not None}")
 
     # -- helpers matching paper's terminology -----------------------------
@@ -606,18 +596,28 @@ class RRTStarPlanner:
         return path
 
     def goal_reached(self, q: Vertex, q_goal: Vertex) -> bool:
-        # If we have a goal mask (e.g., STN volume), any point inside it is a goal.
+        """
+        Goal:
+          - Primary: point inside / very near the STN (goal_mask)
+          - Fallback: within goal_radius of q_goal.pos
+        """
+        # Volume-based goal using STN mask
         if self.goal_mask is not None:
             idx = np.rint(q.pos).astype(int)
-            # Check bounds
+
             if np.any(idx < 0) or np.any(idx >= self.goal_mask.shape):
                 return False
-            inside = bool(self.goal_mask[idx[0], idx[1], idx[2]])
-            if inside and DEBUG:
-                log(f"[RRTStarPlanner.goal_reached] Vertex inside goal mask at index {idx}.")
-            return inside
 
-        # Fallback: spherical goal around q_goal.pos
+            i, j, k = idx
+            i0 = max(0, i - 1); i1 = min(self.goal_mask.shape[0] - 1, i + 1)
+            j0 = max(0, j - 1); j1 = min(self.goal_mask.shape[1] - 1, j + 1)
+            k0 = max(0, k - 1); k1 = min(self.goal_mask.shape[2] - 1, k + 1)
+
+            neighborhood = self.goal_mask[i0:i1+1, j0:j1+1, k0:k1+1]
+            if neighborhood.any():
+                return True
+
+        # Fallback: spherical neighborhood around STN center
         return np.linalg.norm(q.pos - q_goal.pos) <= self.goal_radius
 
 
@@ -810,18 +810,15 @@ def plan_flexible_needle_path(
     a2: float = 0.5,
     w_d: float = 0.5,
     w_theta: float = 0.5,
+    goal_mask: Optional[np.ndarray] = None,   # <--- NEW
 ) -> Optional[PathResult]:
     """
     Full Algorithm 1:
-
       1: P ← LinearPath(q_init, q_goal) ∪ CurvePath(q_init, q_goal)
       2: P ← P ∪ RRTStarPath(q_init, q_goal, N)
       3: P_opt ← MinimumCost(P)
     """
-    log("[plan_flexible_needle_path] Starting planning from one entry...")
-    # L_min: minimal path length – straight distance between endpoints.
     L_min = float(np.linalg.norm(q_goal.pos - q_init.pos))
-    log(f"[plan_flexible_needle_path] L_min (straight distance) = {L_min:.4f}")
 
     candidate_paths: List[PathResult] = []
 
@@ -845,18 +842,13 @@ def plan_flexible_needle_path(
         w_d=w_d,
         w_theta=w_theta,
         curve_step=step / 2.0,
+        goal_mask=goal_mask,              # <--- PASS IT IN
     )
     rrt_path = planner.RRTStarPath(q_init, q_goal)
     if rrt_path is not None:
         candidate_paths.append(rrt_path)
 
-    best = MinimumCost(candidate_paths)
-    if best is None:
-        log("[plan_flexible_needle_path] No feasible path found for this entry.")
-    else:
-        log(f"[plan_flexible_needle_path] Best path cost for this entry={best.cost:.4f}")
-    return best
-
+    return MinimumCost(candidate_paths)
 
 # ---------------------------------------------------------------------------
 # Tiny example to sanity-check
@@ -954,17 +946,16 @@ def optimize_over_entries(
     a2: float = 0.9,
     w_d: float = 0.5,
     w_theta: float = 0.5,
+    goal_mask: Optional[np.ndarray] = None,   # <--- NEW PARAM
 ) -> tuple[Optional[PathResult], list[tuple[Vertex, PathResult]]]:
     """
     Run the planner from each entry on the brain surface and return:
       - best path (minimum cost) or None
       - list of (entry_vertex, PathResult) for all successful entries
     """
-    log(f"[optimize_over_entries] Starting optimization over {len(entries)} entries...")
     all_results: list[tuple[Vertex, PathResult]] = []
 
-    for idx, q_init in enumerate(entries):
-        log(f"[optimize_over_entries] Entry {idx+1}/{len(entries)}: pos={q_init.pos}")
+    for q_init in entries:
         res = plan_flexible_needle_path(
             env=env,
             q_init=q_init,
@@ -977,19 +968,15 @@ def optimize_over_entries(
             a2=a2,
             w_d=w_d,
             w_theta=w_theta,
+            goal_mask=goal_mask,          # <--- PASS IT THROUGH
         )
         if res is not None:
-            log(f"[optimize_over_entries]   -> Success. Cost={res.cost:.4f}, waypoints={len(res.waypoints)}")
             all_results.append((q_init, res))
-        else:
-            log("[optimize_over_entries]   -> No feasible path for this entry.")
 
     if not all_results:
-        log("[optimize_over_entries] No successful paths from any entry.")
         return None, []
 
     best_entry, best_path = min(all_results, key=lambda qr: qr[1].cost)
-    log(f"[optimize_over_entries] Best entry at {best_entry.pos}, cost={best_path.cost:.4f}")
     return best_path, all_results
 
 
