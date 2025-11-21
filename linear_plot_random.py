@@ -33,15 +33,15 @@ for folder_name in os.listdir(base_dir):
     if not nii_files:
         continue
 
-    # # Brain mask
-    # if folder_name == brainmask_folder_name:
-    #     for fpath in nii_files:
-    #         fname = os.path.basename(fpath)
-    #         print(f"  Loading structure: {fname}")
-    #         vol = Volume(fpath)
-    #         surf = vol.isosurface()
-    #         surf.c("grey").alpha(0.05)
-    #         brain_mask_structures.append(surf)
+    # Brain mask
+    if folder_name == brainmask_folder_name:
+        for fpath in nii_files:
+            fname = os.path.basename(fpath)
+            print(f"  Loading structure: {fname}")
+            vol = Volume(fpath)
+            surf = vol.isosurface()
+            surf.c("grey").alpha(0.05)
+            brain_mask_structures.append(surf)
     # Obstacles
     elif folder_name == corpus_callosum_folder_name or folder_name == sulci_folder_name or folder_name == ventricles_folder_name:
         for fpath in nii_files:
@@ -69,15 +69,9 @@ if obstacle_structures:
     merged_obstacles = merge(obstacle_structures)
     merged_obstacles.c("red").alpha(0.75)
 
-# Merge STN structures to sample target point
-merged_stn = None
-if stn_structures:
-    print("Merging STN structures...")
-    merged_stn = merge(stn_structures)
-    merged_stn.c("green").alpha(1.0)
-
 ## Create linear path plot
-# Use bounds from brain mask or obstacles to define start point region
+# Create a simple straight line
+# Use bounds from brain mask or obstacles to define endpoints
 if brain_mask_structures:
     brain_mask_mesh = merge(brain_mask_structures)
     xmin, xmax, ymin, ymax, zmin, zmax = brain_mask_mesh.bounds()
@@ -87,23 +81,15 @@ else:
     # Default bounds if nothing loaded
     xmin, xmax, ymin, ymax, zmin, zmax = -100, 100, -100, 100, -100, 100
 
-# Get a random point within the STN for end point
-if merged_stn:
-    random_point = merged_stn.generate_random_points(1)
-    end_point = tuple(random_point.points[0])
-    print(f"Selected end point within STN: {end_point}")
-else:
-    # Fallback to random point if no STN
-    end_point = (random.uniform(xmin, xmax), random.uniform(ymin, ymax), random.uniform(zmin, zmax))
-    print("Warning: No STN structures found, using random end point")
-
-# Keep regenerating start points until we get a line that doesn't intersect obstacles
+# Create a straight line from random start to random end point
+# Keep regenerating until we get a line that doesn't intersect obstacles
 max_attempts = 1000
 path_line = None
 dval = 0
 
 for attempt in range(max_attempts):
     start_point = (random.uniform(xmin, xmax), random.uniform(ymin, ymax), random.uniform(zmin, zmax))
+    end_point = (random.uniform(xmin, xmax), random.uniform(ymin, ymax), random.uniform(zmin, zmax))
     
     # Check for intersection if we have obstacles
     if merged_obstacles:
@@ -138,10 +124,9 @@ actors = []
 actors.extend(brain_mask_structures)
 if merged_obstacles:
     actors.append(merged_obstacles)
-if merged_stn:
-    actors.append(merged_stn)
+actors.extend(stn_structures)
 if path_line:
     actors.append(path_line)
 
 print("Rendering scene...")
-show(actors, axes=1, viewup="z", title="Straight Line Path To STN with Obstacle Distance")
+show(actors, axes=1, viewup="z", title="Straight Line Path Through Brain with Obstacle Distance")
