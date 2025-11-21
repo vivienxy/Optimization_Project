@@ -5,14 +5,10 @@ import random
 import vedo
 from vedo import Volume, show
 
-# ================== EDIT THIS ==================
-# Folder that contains BRAIN_MASK, SULCI, VENTRICLES, etc.
-base_dir = "/Users/vivienyu/Desktop/opt_proj/FINAL_BRAIN_ATLAS/nii_exports"
-# ==============================================
 
+base_dir = "/Users/vivienyu/Desktop/opt_proj/FINAL_BRAIN_ATLAS/nii_exports"
 brainmask_folder_name = "BRAIN_MASK"
 
-# Some nice distinct colors for non-brainmask structures
 color_palette = [
     "red", "green", "blue", "yellow", "magenta", "cyan",
     "orange", "purple", "pink", "gold", "lime", "salmon",
@@ -21,7 +17,6 @@ color_palette = [
 
 actors = []
 
-# ---------- 1. Load BRAIN_MASK as translucent grey ----------
 brainmask_dir = os.path.join(base_dir, brainmask_folder_name)
 if os.path.isdir(brainmask_dir):
     nii_files = glob.glob(os.path.join(brainmask_dir, "*.nii")) + \
@@ -31,13 +26,12 @@ if os.path.isdir(brainmask_dir):
     for fpath in nii_files:
         print(f"Loading BRAIN_MASK volume: {os.path.basename(fpath)}")
         vol = Volume(fpath)
-        surf = vol.isosurface()   # labelmaps should work fine with default iso
+        surf = vol.isosurface()
         surf.c("grey").alpha(0.05)
         actors.append(surf)
 else:
     print(f"[WARN] BRAIN_MASK folder not found at: {brainmask_dir}")
 
-# ---------- 2. Load all other folders as opaque random colors ----------
 for folder_name in os.listdir(base_dir):
     folder_path = os.path.join(base_dir, folder_name)
     if not os.path.isdir(folder_path):
@@ -57,16 +51,14 @@ for folder_name in os.listdir(base_dir):
         print(f"  Loading structure: {fname}")
         vol = Volume(fpath)
         surf = vol.isosurface()
-        # Random opaque color
         color = random.choice(color_palette)
         surf.c(color).alpha(1.0)
         actors.append(surf)
 
-# ---------- 3. Show everything together ----------
 print("\nRendering 3D scene...")
 plt = show(
     actors,
-    axes=1,            # add axes
+    axes=1,
     viewup="z",        
     title="Brain Structures (vedo)",
 )
