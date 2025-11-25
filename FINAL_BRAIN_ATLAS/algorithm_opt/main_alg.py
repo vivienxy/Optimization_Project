@@ -24,7 +24,7 @@ import numpy as np
 
 DEBUG = True  # master switch
 
-PREVIEW_ENTRIES = True # sanity check for visualizing entry points
+PREVIEW_ENTRIES = False # sanity check for visualizing entry points
 IGNORE_OBSTACLES = True  # simulate no obstacles
 
 def log(msg: str) -> None:
@@ -347,33 +347,27 @@ def CollisionFree(
 # load and resample .nii file
 # ---------------------------------------------------------------------------
 
-def load_and_resample_mask_2mm(path: str) -> Tuple[np.ndarray, np.ndarray]:
+from scipy.ndimage import distance_transform_edt
+# you can now delete the unused "zoom" import
+
+def load_mask_native(path: str) -> Tuple[np.ndarray, np.ndarray]:
     """
-    load a .nii, resample to 2x2x2 mm^3 using nearest neighbour,
-    return (mask, voxel_size_mm).
+    Load a NIfTI at its native resolution (no resampling) and return:
+      - mask: boolean 3D array
+      - voxel_size_mm: [sx, sy, sz] in mm from the affine
     """
-    log(f"[load_and_resample_mask_2mm] Loading NIfTI: {path}")
+    log(f"[load_mask_native] Loading NIfTI (no resampling): {path}")
     nii = nib.load(path)
     data = nii.get_fdata()
     affine = nii.affine
 
-    # original spacing (mm)
-    orig_spacing = np.sqrt((affine[:3, :3] ** 2).sum(axis=0))
-    new_spacing = np.array([2.0, 2.0, 2.0])
+    # voxel spacing from affine
+    voxel_size_mm = np.sqrt((affine[:3, :3] ** 2).sum(axis=0))
+    mask = data > 0.5
 
-    zoom_factors = orig_spacing / new_spacing
-    log(f"[load_and_resample_mask_2mm] Original spacing={orig_spacing}, zoom_factors={zoom_factors}")
-    resampled = zoom(data, zoom=zoom_factors, order=0)
+    log(f"[load_mask_native] shape={mask.shape}, voxel_size_mm={voxel_size_mm}")
+    return mask, voxel_size_mm
 
-    R = affine[:3, :3]
-    R_unit = R / orig_spacing
-    new_aff = np.eye(4)
-    new_aff[:3, :3] = R_unit * new_spacing
-    new_aff[:3, 3] = affine[:3, 3]
-
-    mask = resampled > 0.5
-    log(f"[load_and_resample_mask_2mm] Finished resampling. New shape={mask.shape}")
-    return mask, new_spacing
 
 # ---------------------------------------------------------------------------
 # build environment from .nii files
@@ -395,11 +389,11 @@ def build_dbs_env_and_masks(
     - BRAIN_MASK is used for entry surface + visualization.
     """
     log("[build_dbs_env_and_masks] Starting...")
-    brain_mask, vox = load_and_resample_mask_2mm(brain_path)
-    stn_mask, _   = load_and_resample_mask_2mm(stn_path)
-    cc_mask, _    = load_and_resample_mask_2mm(cc_path)
-    sulci_mask, _ = load_and_resample_mask_2mm(sulci_path)
-    vent_mask, _  = load_and_resample_mask_2mm(vent_path)
+    brain_mask, vox = load_mask_native(brain_path)
+    stn_mask, _   = load_mask_native(stn_path)
+    cc_mask, _    = load_mask_native(cc_path)
+    sulci_mask, _ = load_mask_native(sulci_path)
+    vent_mask, _  = load_mask_native(vent_path)
 
     log("[build_dbs_env_and_masks] All masks loaded & resampled.")
     log(f"  brain_mask.shape={brain_mask.shape}")
@@ -419,7 +413,7 @@ def build_dbs_env_and_masks(
 
     # Goal = STN center of mass (in voxel coords)
     stn_idx = np.argwhere(stn_mask)
-    goal_pos = stn_idx.mean(axis=0)
+    goal_pos = stn_idx[np.random.randint(len(stn_idx))]
     log(f"[build_dbs_env_and_masks] STN center of mass (goal_pos)={goal_pos}")
 
     if IGNORE_OBSTACLES:
@@ -447,7 +441,7 @@ def build_dbs_env_and_masks(
     return env, q_goal, brain_mask, stn_mask, cc_mask, sulci_mask, vent_mask, vox
 
 # ---------------------------------------------------------------------------
-# Preview Brain Mask
+# preview brain mask
 # ---------------------------------------------------------------------------
 
 
@@ -490,19 +484,19 @@ def preview_masks_and_entries(
     if cc_mask is not None:
         cc_vol = Volume(cc_mask.astype(np.uint8), spacing=voxel_size_mm.tolist())
         cc_surf = cc_vol.isosurface(0.5).smooth(8)
-        cc_surf.c("cyan").alpha(0.4)
+        cc_surf.c("cyan").alpha(0.001)
         actors.append(cc_surf)
 
     if sulci_mask is not None:
         sulci_vol = Volume(sulci_mask.astype(np.uint8), spacing=voxel_size_mm.tolist())
         sulci_surf = sulci_vol.isosurface(0.5).decimate(0.8).smooth(8)
-        sulci_surf.c("orange").alpha(0.25)
+        sulci_surf.c("orange").alpha(0.001)
         actors.append(sulci_surf)
 
     if vent_mask is not None:
         vent_vol = Volume(vent_mask.astype(np.uint8), spacing=voxel_size_mm.tolist())
         vent_surf = vent_vol.isosurface(0.5).smooth(8)
-        vent_surf.c("blue").alpha(0.6)
+        vent_surf.c("blue").alpha(0.001)
         actors.append(vent_surf)
 
     # --- entry points ---
@@ -528,10 +522,6 @@ def sample_surface_entries_on_brain(
     q_goal: Vertex,
     n_entries: int = 50,
 ) -> list[Vertex]:
-    """
-    sample candidate entry points on the outer brain surface
-    coordinates are in voxel space
-    """
     log("[sample_surface_entries_on_brain] Building brain surface mesh...")
 
     vol = Volume(brain_mask.astype(np.uint8))
@@ -550,10 +540,21 @@ def sample_surface_entries_on_brain(
 
     entries: list[Vertex] = []
     for p in pts_sel:
-        head = normalize(q_goal.pos - p)   # point inward toward stn
+        to_goal = normalize(q_goal.pos - p)
+
+        # add a small lateral component so heading is not perfectly colinear
+        tmp = np.array([1.0, 0.0, 0.0])
+        if abs(np.dot(to_goal, tmp)) > 0.9:
+            tmp = np.array([0.0, 1.0, 0.0])
+
+        lateral = normalize(np.cross(to_goal, tmp))
+        head = normalize(to_goal + 0.2 * lateral)  # 0.2 = small tilt
+
         entries.append(Vertex(pos=p.astype(float), head=head, parent=0, cost=0.0))
+
     log("[sample_surface_entries_on_brain] Finished generating entry vertices.")
     return entries
+
 
 
 # ---------------------------------------------------------------------------
@@ -673,28 +674,20 @@ class RRTStarPlanner:
 
     def goal_reached(self, q: Vertex, q_goal: Vertex) -> bool:
         """
-        goal:
-          - primary: point inside / very near the STN (goal_mask)
-          - fallback: within goal_radius of q_goal.pos
+        Goal is reached only if the vertex is INSIDE the STN mask.
         """
-        # vol based goal w stn mask
         if self.goal_mask is not None:
             idx = np.rint(q.pos).astype(int)
-
             if np.any(idx < 0) or np.any(idx >= self.goal_mask.shape):
                 return False
+            return bool(self.goal_mask[idx[0], idx[1], idx[2]])
 
-            i, j, k = idx
-            i0 = max(0, i - 1); i1 = min(self.goal_mask.shape[0] - 1, i + 1)
-            j0 = max(0, j - 1); j1 = min(self.goal_mask.shape[1] - 1, j + 1)
-            k0 = max(0, k - 1); k1 = min(self.goal_mask.shape[2] - 1, k + 1)
+        # If no goal_mask: fall back to spherical target
+        return np.linalg.norm(q.pos - q_goal.pos) <= self.goal_radius
 
-            neighborhood = self.goal_mask[i0:i1+1, j0:j1+1, k0:k1+1]
-            if neighborhood.any():
-                return True
 
         # fallback: spherical neighborhood around STN center? --> or maybe we can change to elliipsoid
-        return np.linalg.norm(q.pos - q_goal.pos) <= self.goal_radius
+       # return np.linalg.norm(q.pos - q_goal.pos) <= self.goal_radius
 
 
     # -- main RRT* loop ---------------------------------------------------
@@ -838,8 +831,10 @@ def LinearPath(
     if env.collision_free_points(pos):
         c = edge_cost(E, env, L_min, a1, a2)
         log(f"[LinearPath] Straight path is collision-free. Cost={c:.4f}")
+        log(f"[LinearPath] L_min={L_min:.6f}, cost={c:.6f}")
         return PathResult(waypoints=E, cost=c)
     log("[LinearPath] Straight path is in collision.")
+    log(f"[LinearPath] L_min={L_min:.6f}, cost=N/A (path invalid)")
     return None
 
 
@@ -862,8 +857,12 @@ def CurvePath(
     if env.collision_free_points(pos) and kappa(q_init, q_goal) < 1.0 / r_min:
         c = edge_cost(E, env, L_min, a1, a2)
         log(f"[CurvePath] Curved path is collision-free. Cost={c:.4f}")
+        log(f"[CurvePath] L_min={L_min:.6f}, cost={c:.6f}")
         return PathResult(waypoints=E, cost=c)
     log("[CurvePath] Curved path is in collision or violates curvature constraint.")
+    log(f"[CurvePath] L_min={L_min:.6f}, cost=N/A (path invalid)")
+
+
     return None
 
 
@@ -1025,14 +1024,12 @@ def optimize_over_entries(
     w_d: float = 0.5,
     w_theta: float = 0.5,
     goal_mask: Optional[np.ndarray] = None,
-) -> tuple[Optional[PathResult], list[tuple[Vertex, PathResult]]]:
-    """
-    run the planner from each entry on the brain surface and return:
-      - best path (minimum cost) or None
-      - list of (entry_vertex, PathResult) for all successful entries
-    """
-    all_results: list[tuple[Vertex, PathResult]] = []
+) -> tuple[Optional[PathResult], list[tuple[Vertex, PathResult]], list[Vertex]]:
 
+    all_successes: list[tuple[Vertex, PathResult]] = []
+    all_failures: list[Vertex] = []
+
+    # Run planner on each entry
     for q_init in entries:
         res = plan_flexible_needle_path(
             env=env,
@@ -1048,14 +1045,21 @@ def optimize_over_entries(
             w_theta=w_theta,
             goal_mask=goal_mask,
         )
+
         if res is not None:
-            all_results.append((q_init, res))
+            all_successes.append((q_init, res))
+        else:
+            all_failures.append(q_init)
 
-    if not all_results:
-        return None, []
+    # Nothing succeeded → return all 3 values
+    if not all_successes:
+        return None, all_successes, all_failures
 
-    best_entry, best_path = min(all_results, key=lambda qr: qr[1].cost)
-    return best_path, all_results
+    # Select minimum-cost success
+    best_entry, best_path = min(all_successes, key=lambda qr: qr[1].cost)
+
+    return best_path, all_successes, all_failures
+
 
 
 # ---------------------------------------------------------------------------
@@ -1065,13 +1069,26 @@ def optimize_over_entries(
 def plot_trajectories_3d_with_structures(
     best: PathResult,
     all_results: list[tuple[Vertex, PathResult]],
+    failed_entries: list[Vertex],
     brain_mask: np.ndarray,
     stn_mask: np.ndarray,
     cc_mask: np.ndarray,
     sulci_mask: np.ndarray,
     vent_mask: np.ndarray,
     voxel_size_mm: np.ndarray,
+    q_goal: Vertex,
+    r_min: float,
+    step: float = 1.0,
 ):
+    """
+    Visualize:
+      - ONE straight path (blue)
+      - ONE curved path (orange, with min radius 40 mm)
+      - ONE RRT* path (red = 'best')
+
+    All three start at the SAME point on the brain surface.
+    """
+
     log("[plot_trajectories_3d_with_structures] Building 3D actors for visualization...")
     actors = []
 
@@ -1080,73 +1097,210 @@ def plot_trajectories_3d_with_structures(
         return p * voxel_size_mm
 
     # --- structural surfaces ------------------------------------------------
-    # brain outer surface
     log("[plot_trajectories_3d_with_structures] Generating brain surface...")
     brain_vol = Volume(brain_mask.astype(np.uint8), spacing=voxel_size_mm.tolist())
     brain_surf = brain_vol.isosurface(0.5).smooth(20)
     brain_surf.c("lightgray").alpha(0.25)
     actors.append(brain_surf)
 
-    # corpus callosum
     log("[plot_trajectories_3d_with_structures] Generating corpus callosum surface...")
     cc_vol = Volume(cc_mask.astype(np.uint8), spacing=voxel_size_mm.tolist())
     cc_surf = cc_vol.isosurface(0.5).smooth(10)
-    cc_surf.c("cyan").alpha(0.4)
+    cc_surf.c("cyan").alpha(0.001)
     actors.append(cc_surf)
 
-    # sulci
     log("[plot_trajectories_3d_with_structures] Generating sulci surface...")
     sulci_vol = Volume(sulci_mask.astype(np.uint8), spacing=voxel_size_mm.tolist())
     sulci_surf = sulci_vol.isosurface(0.5).decimate(0.8).smooth(10)
-    sulci_surf.c("orange").alpha(0.25)
+    sulci_surf.c("orange").alpha(0.001)
     actors.append(sulci_surf)
 
-    # ventricles
     log("[plot_trajectories_3d_with_structures] Generating ventricles surface...")
     vent_vol = Volume(vent_mask.astype(np.uint8), spacing=voxel_size_mm.tolist())
     vent_surf = vent_vol.isosurface(0.5).smooth(10)
-    vent_surf.c("blue").alpha(0.6)
+    vent_surf.c("blue").alpha(0.001)
     actors.append(vent_surf)
 
-    # stn (goal region)
     log("[plot_trajectories_3d_with_structures] Generating STN surface...")
     stn_vol = Volume(stn_mask.astype(np.uint8), spacing=voxel_size_mm.tolist())
     stn_surf = stn_vol.isosurface(0.5).smooth(8)
     stn_surf.c("green").alpha(0.9)
     actors.append(stn_surf)
 
-    # --- trajectories -------------------------------------------------------
-    log("[plot_trajectories_3d_with_structures] Adding trajectories...")
-    # non-optimal paths
+    # ------------------------------------------------------------------
+    # Find the entry vertex corresponding to the chosen best path
+    # ------------------------------------------------------------------
+    log("[plot_trajectories_3d_with_structures] Finding best entry for chosen path...")
+    best_entry: Optional[Vertex] = None
     for q_init, path in all_results:
         if path is best:
-            continue
-        pts = np.array([to_world(v.pos) for v in path.waypoints])
-        line = Line(pts)
-        line.c("lightgray").alpha(0.15).lw(1)
-        actors.append(line)
+            best_entry = q_init
+            break
 
-    # optimal path
-    best_pts = np.array([to_world(v.pos) for v in best.waypoints])
-    best_line = Line(best_pts)
-    best_line.c("red").alpha(1.0).lw(4)
-    actors.append(best_line)
+    if best_entry is None:
+        if all_results:
+            best_entry = all_results[0][0]
+            log("[plot_trajectories_3d_with_structures] WARNING: best path not found in all_results; using first entry.")
+        else:
+            v0 = best.waypoints[0]
+            best_entry = Vertex(pos=v0.pos.copy(), head=v0.head.copy(), parent=0, cost=0.0)
+            log("[plot_trajectories_3d_with_structures] WARNING: all_results empty; using best path start as entry.")
 
-    # entry points
-    entry_pts = [to_world(q.pos) for (q, _) in all_results]
-    if entry_pts:
-        entries_actor = Points(entry_pts, r=5)
-        entries_actor.c("magenta").alpha(0.6)
-        actors.append(entries_actor)
+    # Common entry point in WORLD space, snapped to brain surface
+    entry_world_guess = to_world(best_entry.pos)
+    entry_world = np.array(brain_surf.closest_point(entry_world_guess))
 
-    # goal point
-    goal_pt = to_world(best.waypoints[-1].pos)
-    goal_actor = Points([goal_pt], r=10)
+    # Goal in WORLD space (STN)
+    goal_world = to_world(best.waypoints[-1].pos)
+
+    # Mark entry + goal
+    entry_actor = Points([entry_world], r=8)
+    entry_actor.c("white").alpha(1.0)
+    actors.append(entry_actor)
+
+    goal_actor = Points([goal_world], r=10)
     goal_actor.c("yellow").alpha(1.0)
     actors.append(goal_actor)
 
+    # ------------------------------------------------------------------
+    # 1) STRAIGHT PATH (blue) – from entry to STN
+    # ------------------------------------------------------------------
+    log("[plot_trajectories_3d_with_structures] Adding straight path (blue)...")
+
+    straight_edge = StraightLine(best_entry, q_goal, step)
+    straight_pts_world = np.array([to_world(v.pos) for v in straight_edge])
+
+    # force same start point
+    straight_pts_world[0] = entry_world
+
+    straight_actor = Line(straight_pts_world)
+    straight_actor.c("blue").alpha(0.9).lw(3)
+    actors.append(straight_actor)
+
+    # ------------------------------------------------------------------
+    # 2) CURVED PATH (orange) – cubic Bézier with curvature limit
+    # ------------------------------------------------------------------
+    log("[plot_trajectories_3d_with_structures] Adding curved path (orange) with curvature limit...")
+
+    def estimate_min_radius(points: np.ndarray) -> float:
+        """
+        Estimate minimum radius of curvature along a polyline.
+        Returns +inf if we can't compute curvature.
+        """
+        if points.shape[0] < 3:
+            return float("inf")
+
+        min_R = float("inf")
+        for i in range(1, points.shape[0] - 1):
+            A = points[i - 1]
+            B = points[i]
+            C = points[i + 1]
+
+            AB = B - A
+            BC = C - B
+            AC = C - A
+
+            a = np.linalg.norm(AB)
+            b = np.linalg.norm(BC)
+            c = np.linalg.norm(AC)
+            if a == 0.0 or b == 0.0 or c == 0.0:
+                continue
+
+            # curvature k = |(B-A) x (C-A)| / (|AB| * |BC| * |AC|)
+            cross = np.cross(AB, AC)
+            area2 = np.linalg.norm(cross)  # = 2 * area of triangle
+            k = area2 / (a * b * c)
+            if k == 0.0:
+                continue
+            R = 1.0 / k
+            if R < min_R:
+                min_R = R
+        return min_R
+
+    def bezier_curve_with_limit(
+        p0: np.ndarray,
+        p3: np.ndarray,
+        R_min_mm: float = 40.0,
+        bend_scale_init: float = 0.35,
+        n_points: int = 120,
+        max_iter: int = 12,
+    ) -> np.ndarray:
+        """
+        Cubic Bézier from p0 to p3 with lateral offset, but enforce
+        minimum radius of curvature R_min_mm by shrinking bend_scale
+        if needed.
+        """
+        chord = p3 - p0
+        chord_len = np.linalg.norm(chord)
+        if chord_len == 0.0:
+            return np.repeat(p0[None, :], n_points, axis=0)
+
+        d = chord / chord_len
+
+        # choose "up" not parallel to d
+        up = np.array([0.0, 0.0, 1.0])
+        if abs(np.dot(d, up)) > 0.9:
+            up = np.array([0.0, 1.0, 0.0])
+
+        lateral = np.cross(d, up)
+        lateral /= np.linalg.norm(lateral)
+
+        bend_scale = bend_scale_init
+        pts = None
+
+        for _ in range(max_iter):
+            offset = bend_scale * chord_len * lateral
+
+            p1 = p0 + chord * 0.33 + offset
+            p2 = p0 + chord * 0.66 + offset
+
+            ts = np.linspace(0.0, 1.0, n_points)
+            pts = (
+                (1 - ts)[:, None] ** 3 * p0[None, :]
+                + 3 * (1 - ts)[:, None] ** 2 * ts[:, None] * p1[None, :]
+                + 3 * (1 - ts)[:, None] * ts[:, None] ** 2 * p2[None, :]
+                + ts[:, None] ** 3 * p3[None, :]
+            )
+
+            R_min_est = estimate_min_radius(pts)
+            log(f"[bezier_curve_with_limit] bend_scale={bend_scale:.4f}, estimated min R={R_min_est:.2f} mm")
+
+            # If we cannot compute curvature, or we're within limits, accept.
+            if not np.isfinite(R_min_est) or R_min_est >= R_min_mm:
+                break
+
+            # Too tight: reduce bend and try again.
+            bend_scale *= 0.5
+
+        return pts
+
+    curve_pts_world = bezier_curve_with_limit(
+        entry_world,
+        goal_world,
+        R_min_mm=100.0,      # <- your 40 mm minimum radius
+        bend_scale_init=0.35,
+        n_points=120,
+    )
+    curve_actor = Line(curve_pts_world)
+    curve_actor.c("orange").alpha(0.9).lw(3)
+    actors.append(curve_actor)
+
+    # ------------------------------------------------------------------
+    # 3) RRT* PATH (red) – 'best' path
+    # ------------------------------------------------------------------
+    log("[plot_trajectories_3d_with_structures] Adding RRT* path (red)...")
+    rrt_pts_world = np.array([to_world(v.pos) for v in best.waypoints])
+
+    # force same entry for visual comparison
+    rrt_pts_world[0] = entry_world
+
+    rrt_actor = Line(rrt_pts_world)
+    rrt_actor.c("red").alpha(1.0).lw(4)
+    actors.append(rrt_actor)
+
     log("[plot_trajectories_3d_with_structures] Rendering with vedo.show()...")
-    show(actors, "DBS trajectories on full anatomy", axes=1, viewup="z")
+    show(actors, "DBS trajectories (straight / curved / RRT*)", axes=1, viewup="z")
+
 
 
 def find_first_collision_point(env: Environment, edge: list[Vertex]) -> tuple[Optional[np.ndarray], Optional[Obstacle]]:
@@ -1329,9 +1483,9 @@ def optimize_dbs():
         )
 
     voxel_size = vox  # [2.0, 2.0, 2.0]
-    r_min_vox = 40  # 1/R = 0.025, R = 40
-    N_SURFACE_ENTRIES = 100
-    N_ITERATIONS = 10000
+    r_min_vox = 1  # 1/R = 0.025, R = 40
+    N_SURFACE_ENTRIES = 1
+    N_ITERATIONS = 200
 
     log(f"[optimize_dbs] Voxel size (mm) = {voxel_size}")
 
@@ -1355,7 +1509,7 @@ def optimize_dbs():
 
     # part 2: optimize over generated entries
     log(f"[optimize_dbs] Starting optimization over entries with r_min_vox={r_min_vox}...")
-    best, all_results = optimize_over_entries(
+    best, all_successes, all_failures = optimize_over_entries(
         env,
         q_goal,
         entries=entries,
@@ -1382,17 +1536,21 @@ def optimize_dbs():
     log("[optimize_dbs] Plotting trajectories with anatomical structures...")
     plot_trajectories_3d_with_structures(
         best,
-        all_results,
+        all_successes,
+        all_failures,
         brain_mask,
         stn_mask,
         cc_mask,
         sulci_mask,
         vent_mask,
         voxel_size_mm=voxel_size,
+        q_goal=q_goal,
+        r_min=r_min_vox,
+        step=1.0,
     )
 
     log("[optimize_dbs] ===== Finished DBS optimization pipeline =====")
-    return best, all_results, voxel_size
+    return best, all_successes, all_failures, voxel_size
 
 
 if __name__ == "__main__":
