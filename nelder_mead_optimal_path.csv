@@ -1,2 +1,2 @@
-hemisphere,start_x,start_y,start_z,end_x,end_y,end_z,obstacle_distance,path_length,weighted_objective
-right,89.01414108276367,92.48655700683594,120.59392929077148,108.0,129.75,86.75,7.648529270389178,53.79998673204976,-0.8764958056310339
+method,hemisphere,start_x,start_y,start_z,end_x,end_y,end_z,obstacle_distance,path_length,weighted_objective
+Nelder-Mead,right,88.44739532470703,131.32716369628906,87.4511947631836,108.0,129.75,86.75,7.648529270389178,19.628639000427327,-0.885427712943179

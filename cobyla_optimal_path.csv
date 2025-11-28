@@ -1,0 +1,2 @@
+method,hemisphere,start_x,start_y,start_z,end_x,end_y,end_z,obstacle_distance,path_length,weighted_objective
+COBYLA,right,75.6675796508789,129.8236541748047,99.22866821289062,108.0,129.75,86.75,7.648529270389178,34.65700493316081,-0.8685666997788106
